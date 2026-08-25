@@ -1,0 +1,8 @@
+.email_verify_app/
+__pycache__/
+*.pyc
+credentials.json
+google_credentials.json
+email_verify_checkpoint.json
+*.xlsx
+.streamlit/secrets.toml
