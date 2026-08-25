@@ -2,5 +2,6 @@ requests
 gspread
 google-auth
 openpyxl
+pandas
 streamlit>=1.37
 plotly

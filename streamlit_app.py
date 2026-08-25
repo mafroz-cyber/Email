@@ -1,10 +1,12 @@
 import json
 import os
+import re
 import tempfile
 import time
 from io import BytesIO
 from pathlib import Path
 
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -154,6 +156,20 @@ def unique_email_map(pending):
     for item in pending:
         email_to_rows.setdefault(item["email"], []).append(item["row"])
     return email_to_rows
+
+
+def parse_pasted_emails(text):
+    if not text:
+        return []
+
+    seen = set()
+    emails = []
+    for token in re.split(r"[\s,;]+", text.strip()):
+        email = clean_email(token)
+        if email and email not in seen:
+            seen.add(email)
+            emails.append(email)
+    return emails
 
 
 def build_excel_source(uploaded_file, worksheet_name):
@@ -314,11 +330,8 @@ def sidebar_nav():
     if "page" not in st.session_state:
         st.session_state.page = "Setup"
 
-    page = st.sidebar.radio(
-        "Navigation",
-        ["Setup", "Dashboard", "Instructions"],
-        index=["Setup", "Dashboard", "Instructions"].index(st.session_state.page),
-    )
+    pages = ["Setup", "Dashboard", "Quick Verify", "Instructions"]
+    page = st.sidebar.radio("Navigation", pages, index=pages.index(st.session_state.page))
     st.session_state.page = page
 
     st.sidebar.divider()
@@ -576,6 +589,127 @@ def dashboard_page():
             pass
 
 
+MAX_QUICK_BULK = 500
+
+
+def results_to_csv_bytes(rows):
+    return pd.DataFrame(rows).to_csv(index=False).encode("utf-8")
+
+
+def results_to_excel_bytes(rows):
+    buffer = BytesIO()
+    pd.DataFrame(rows).to_excel(buffer, index=False, sheet_name="Results")
+    return buffer.getvalue()
+
+
+def render_download_buttons(rows, key_prefix):
+    d1, d2 = st.columns(2)
+    d1.download_button(
+        "Download CSV",
+        data=results_to_csv_bytes(rows),
+        file_name="verified_emails.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key=f"{key_prefix}_csv",
+    )
+    d2.download_button(
+        "Download Excel",
+        data=results_to_excel_bytes(rows),
+        file_name="verified_emails.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key=f"{key_prefix}_xlsx",
+    )
+
+
+def quick_verify_page():
+    app_header("Quick Verify", "Check one email, or paste up to 500 to verify and download.")
+
+    tab_single, tab_bulk = st.tabs(["Single email", "Bulk paste"])
+
+    with tab_single:
+        with st.container(border=True):
+            email_input = st.text_input("Email address", placeholder="someone@example.com")
+            if st.button("Verify", type="primary", key="single_verify_btn"):
+                email = clean_email(email_input)
+                if not email:
+                    st.warning("Enter an email address.")
+                else:
+                    with st.spinner(f"Verifying {email}..."):
+                        try:
+                            results = verify_batch([email], 30, 3)
+                            result = results[0] if results else {"email": email, "status": "FAILED"}
+                            verification, score_reason = convert_result(result)
+                        except Exception as exc:
+                            verification, score_reason = None, str(exc)
+
+                    if verification == "Valid":
+                        st.success(f"{email} -> Valid | {score_reason}")
+                    elif verification == "Invalid":
+                        st.error(f"{email} -> Invalid | {score_reason}")
+                    else:
+                        st.error(f"Could not verify {email}: {score_reason}")
+
+    with tab_bulk:
+        with st.container(border=True):
+            pasted = st.text_area(
+                "Paste emails — one per line, or separated by commas/spaces",
+                height=220,
+                placeholder="jane@example.com\njohn@example.com\n...",
+            )
+            emails = parse_pasted_emails(pasted)[:MAX_QUICK_BULK]
+            total_found = len(parse_pasted_emails(pasted))
+
+            caption = f"{len(emails)} unique email(s) ready to verify"
+            if total_found > MAX_QUICK_BULK:
+                caption += f" (only the first {MAX_QUICK_BULK} of {total_found} pasted will be verified)"
+            st.caption(caption)
+
+            start_bulk = st.button(
+                "Verify all", type="primary", disabled=not emails, key="bulk_verify_btn"
+            )
+
+        if start_bulk:
+            progress = st.progress(0.0)
+            status = st.empty()
+            rows = []
+            chunk_size = 50
+
+            for i in range(0, len(emails), chunk_size):
+                chunk = emails[i : i + chunk_size]
+                status.info(f"Verifying {i + 1}-{i + len(chunk)} of {len(emails)}...")
+
+                try:
+                    results = verify_batch(chunk, 30, 3)
+                except Exception:
+                    results = []
+                result_by_email = {clean_email(r.get("email", "")): r for r in results}
+
+                for email in chunk:
+                    result = result_by_email.get(email, {"email": email, "status": "FAILED"})
+                    verification, score_reason = convert_result(result)
+                    rows.append({"Email": email, "Result": verification, "Score / Reason": score_reason})
+
+                progress.progress(min((i + len(chunk)) / len(emails), 1.0))
+                if i + chunk_size < len(emails):
+                    time.sleep(2)
+
+            status.success(f"Verified {len(rows)} email(s).")
+            st.session_state.quick_verify_results = rows
+
+        results_rows = st.session_state.get("quick_verify_results")
+        if results_rows:
+            valid_count = sum(1 for row in results_rows if row["Result"] == "Valid")
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total", len(results_rows))
+            c2.metric("Valid", valid_count)
+            c3.metric("Invalid", len(results_rows) - valid_count)
+
+            st.dataframe(pd.DataFrame(results_rows), use_container_width=True, hide_index=True)
+            render_download_buttons(results_rows, key_prefix="bulk")
+
+
 def instructions_page():
     app_header("Instructions", "A new-user setup guide with direct credential links.")
 
@@ -658,6 +792,8 @@ def main():
         setup_page()
     elif page == "Dashboard":
         dashboard_page()
+    elif page == "Quick Verify":
+        quick_verify_page()
     else:
         instructions_page()
 
