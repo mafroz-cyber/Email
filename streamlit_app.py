@@ -25,7 +25,6 @@ from verify_emails import (
     DEFAULT_RESULT_COLUMN,
     DEFAULT_SCORE_COLUMN,
     DEFAULT_SPREADSHEET_URL,
-    DEFAULT_WORKSHEET_NAME,
     GOOGLE_CREDENTIALS_ENV,
     ExcelSource,
     GoogleSheetSource,
@@ -212,6 +211,43 @@ def cached_google_rows(spreadsheet_url, worksheet_name, credentials_text, cache_
     return source.read_rows()
 
 
+@st.cache_resource(show_spinner="Opening spreadsheet...")
+def cached_google_spreadsheet(spreadsheet_url, credentials_text):
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    if credentials_text.strip():
+        credentials = Credentials.from_service_account_info(
+            json.loads(credentials_text), scopes=scopes
+        )
+    else:
+        credentials = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+
+    client = gspread.authorize(credentials)
+    return client.open_by_url(spreadsheet_url)
+
+
+@st.cache_data(ttl=120, show_spinner="Fetching sheet tabs...")
+def cached_worksheet_titles(spreadsheet_url, credentials_text):
+    spreadsheet = cached_google_spreadsheet(spreadsheet_url, credentials_text)
+    return [worksheet.title for worksheet in spreadsheet.worksheets()]
+
+
+def read_excel_rows_from_bytes(file_bytes, sheet_name):
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(BytesIO(file_bytes), data_only=True)
+    worksheet = workbook[sheet_name] if sheet_name else workbook.active
+    rows = []
+    for row in worksheet.iter_rows(values_only=True):
+        rows.append(["" if value is None else str(value) for value in row])
+    return rows
+
+
 def make_source(config):
     if config["mode"] == "Google Sheets":
         credentials_text = config.get("credentials_text", "") or load_credentials_text()
@@ -270,6 +306,78 @@ def scan_source(rows, config):
         "result_col": result_col,
         "score_col": column_to_index(config["score_column"]),
     }
+
+
+EMAIL_HEADER_HINTS = ("email", "e-mail", "mail id", "mailid")
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+RESULT_VALUE_HINTS = {"valid", "invalid"}
+SCORE_VALUE_PATTERN = re.compile(r"^-?\d+(\.\d+)?(\s*-\s*.+)?$")
+
+
+def detect_email_column(rows):
+    if not rows:
+        return None
+
+    header = rows[0]
+    for idx, cell in enumerate(header, start=1):
+        text = str(cell).strip().lower()
+        if any(hint in text for hint in EMAIL_HEADER_HINTS):
+            return index_to_column(idx)
+
+    sample = rows[1:200]
+    if not sample:
+        return None
+
+    max_cols = max((len(row) for row in sample), default=0)
+    best_col, best_ratio = None, 0.0
+    for col in range(1, max_cols + 1):
+        values = [
+            str(row[col - 1]).strip()
+            for row in sample
+            if len(row) >= col and str(row[col - 1]).strip()
+        ]
+        if len(values) < 3:
+            continue
+        matches = sum(1 for value in values if EMAIL_PATTERN.match(value))
+        ratio = matches / len(values)
+        if ratio > best_ratio:
+            best_col, best_ratio = col, ratio
+
+    return index_to_column(best_col) if best_ratio >= 0.5 else None
+
+
+def _column_values(rows, col_idx, sample=300):
+    return [
+        str(row[col_idx - 1]).strip()
+        for row in rows[1:sample]
+        if len(row) >= col_idx and str(row[col_idx - 1]).strip()
+    ]
+
+
+def _column_has_foreign_data(values, looks_like_ours):
+    if not values:
+        return False
+    matches = sum(1 for value in values if looks_like_ours(value))
+    return (matches / len(values)) < 0.6
+
+
+def detect_result_score_columns(rows):
+    result_idx = column_to_index(DEFAULT_RESULT_COLUMN)
+    score_idx = column_to_index(DEFAULT_SCORE_COLUMN)
+
+    result_conflict = _column_has_foreign_data(
+        _column_values(rows, result_idx), lambda v: v.lower() in RESULT_VALUE_HINTS
+    )
+    score_conflict = _column_has_foreign_data(
+        _column_values(rows, score_idx), lambda v: bool(SCORE_VALUE_PATTERN.match(v))
+    )
+
+    if not result_conflict and not score_conflict:
+        return DEFAULT_RESULT_COLUMN, DEFAULT_SCORE_COLUMN
+
+    last_used = max((len(row) for row in rows), default=0)
+    shift_start = max(last_used, result_idx, score_idx) + 1
+    return index_to_column(shift_start), index_to_column(shift_start + 1)
 
 
 def _donut_chart(segments, height=230):
@@ -385,17 +493,222 @@ def sidebar_nav():
     page = st.sidebar.radio("Navigation", pages, index=pages.index(st.session_state.page))
     st.session_state.page = page
 
+    config = st.session_state.get("config") or load_saved_config()
     st.sidebar.divider()
     st.sidebar.caption("Current output")
-    st.sidebar.write(f"Email: `{DEFAULT_EMAIL_COLUMN}`")
-    st.sidebar.write(f"Result: `{DEFAULT_RESULT_COLUMN}`")
-    st.sidebar.write(f"Score: `{DEFAULT_SCORE_COLUMN}`")
+    st.sidebar.write(f"Email: `{config.get('email_column', DEFAULT_EMAIL_COLUMN)}`")
+    st.sidebar.write(f"Result: `{config.get('result_column', DEFAULT_RESULT_COLUMN)}`")
+    st.sidebar.write(f"Score: `{config.get('score_column', DEFAULT_SCORE_COLUMN)}`")
 
     return page
 
 
+def _column_picker(label, header, saved_value, key):
+    col_count = max(len(header), 6)
+    options = [index_to_column(i) for i in range(1, col_count + 1)]
+
+    def _label(letter, i):
+        heading = header[i - 1].strip() if i - 1 < len(header) and header[i - 1] else ""
+        return f"{letter} — {heading}" if heading else letter
+
+    labels = [_label(letter, i) for i, letter in enumerate(options, start=1)]
+    default_idx = options.index(saved_value) if saved_value in options else 0
+    chosen = st.selectbox(label, labels, index=default_idx, key=key)
+    return chosen.split(" ")[0]
+
+
+def _range_and_delay_fields(saved, row_count):
+    r1, r2, r3 = st.columns(3)
+    start_row = r1.number_input("Start row", min_value=1, value=int(saved.get("start_row", 2)), step=1)
+    with r2:
+        end_all = st.checkbox("All rows (to end of sheet)", value=bool(saved.get("end_row_all", True)))
+        end_row = r2.number_input(
+            "End row",
+            min_value=1,
+            value=int(saved.get("end_row", row_count or 100)),
+            step=1,
+            disabled=end_all,
+        )
+    delay_seconds = r3.number_input(
+        "Delay after each email", min_value=0, value=int(saved.get("delay_seconds", 8)), step=1
+    )
+    return start_row, end_all, end_row, delay_seconds
+
+
+def google_sheets_setup(saved):
+    with st.container(border=True):
+        st.markdown('<div class="ev-kicker">Step 1 · Google Service Account JSON</div>', unsafe_allow_html=True)
+        existing_credentials = load_credentials_text()
+        saved_client_email = get_json_client_email(existing_credentials)
+        if saved_client_email:
+            st.success(f"Using saved JSON. Share your sheet with: {saved_client_email}")
+
+        credentials_text = st.text_area(
+            "Paste service account JSON",
+            value="",
+            height=150,
+            placeholder="Paste the full JSON here. You can save it on this computer.",
+        )
+        s1, s2 = st.columns(2)
+        remember_json = s1.checkbox("Save this JSON on this computer", value=False)
+        if s2.button("Forget saved JSON", width="stretch"):
+            remove_saved_credentials()
+            st.success("Saved JSON removed.")
+            st.rerun()
+
+    active_credentials = credentials_text.strip() or existing_credentials.strip()
+    if not active_credentials:
+        st.info("Paste a service account JSON (or reuse a saved one) to continue.")
+        return None
+
+    with st.container(border=True):
+        st.markdown('<div class="ev-kicker">Step 2 · Spreadsheet URL</div>', unsafe_allow_html=True)
+        spreadsheet_url = st.text_input(
+            "Paste the Google Sheet URL", saved.get("spreadsheet_url", DEFAULT_SPREADSHEET_URL)
+        ).strip()
+
+    if not spreadsheet_url:
+        st.info("Paste the spreadsheet URL to continue.")
+        return None
+
+    with st.container(border=True):
+        st.markdown('<div class="ev-kicker">Step 3 · Worksheet</div>', unsafe_allow_html=True)
+        try:
+            titles = cached_worksheet_titles(spreadsheet_url, active_credentials)
+        except Exception as exc:
+            st.error(f"Could not open that spreadsheet: {exc}")
+            return None
+
+        if not titles:
+            st.warning("No worksheet tabs found in that spreadsheet.")
+            return None
+
+        saved_ws = saved.get("worksheet_name", "")
+        default_index = titles.index(saved_ws) if saved_ws in titles else 0
+        worksheet_name = st.selectbox("Worksheet / tab", titles, index=default_index)
+
+    with st.container(border=True):
+        st.markdown('<div class="ev-kicker">Step 4 · Columns and Range</div>', unsafe_allow_html=True)
+        try:
+            rows = cached_google_rows(spreadsheet_url, worksheet_name, active_credentials, 0)
+        except Exception as exc:
+            st.error(f"Could not read rows: {exc}")
+            return None
+
+        header = rows[0] if rows else []
+        email_column = detect_email_column(rows)
+        if email_column:
+            st.success(f"Auto-detected email column: **{email_column}**")
+        else:
+            st.warning("Could not auto-detect the email column — pick it below.")
+            email_column = _column_picker(
+                "Email column", header, saved.get("email_column", ""), key="gs_email_col"
+            )
+
+        result_column, score_column = detect_result_score_columns(rows)
+        st.info(f"Results write to **{result_column}** (Valid/Invalid) and **{score_column}** (score/reason).")
+
+        start_row, end_all, end_row, delay_seconds = _range_and_delay_fields(saved, len(rows))
+
+    config = {
+        "mode": "Google Sheets",
+        "spreadsheet_url": spreadsheet_url,
+        "worksheet_name": worksheet_name,
+        "excel_sheet": "",
+        "email_column": email_column,
+        "result_column": result_column,
+        "score_column": score_column,
+        "start_row": int(start_row),
+        "end_row": 10**9 if end_all else int(end_row),
+        "end_row_all": end_all,
+        "delay_seconds": int(delay_seconds),
+        "retry_delay": 30,
+        "jitter": 3,
+    }
+    return config, credentials_text, remember_json
+
+
+def excel_setup(saved):
+    with st.container(border=True):
+        st.markdown('<div class="ev-kicker">Excel Upload</div>', unsafe_allow_html=True)
+        uploaded_file = st.file_uploader("Upload .xlsx file", type=["xlsx"])
+        if uploaded_file:
+            st.session_state.excel_file = uploaded_file
+
+    uploaded_file = st.session_state.get("excel_file")
+    if uploaded_file is None:
+        st.info("Upload an Excel file to continue.")
+        return None
+
+    with st.container(border=True):
+        st.markdown('<div class="ev-kicker">Step · Worksheet</div>', unsafe_allow_html=True)
+        try:
+            from openpyxl import load_workbook
+
+            titles = load_workbook(BytesIO(uploaded_file.getvalue()), read_only=True).sheetnames
+        except Exception as exc:
+            st.error(f"Could not read workbook: {exc}")
+            return None
+
+        saved_sheet = saved.get("excel_sheet", "")
+        default_index = titles.index(saved_sheet) if saved_sheet in titles else 0
+        excel_sheet = st.selectbox("Worksheet", titles, index=default_index)
+
+    with st.container(border=True):
+        st.markdown('<div class="ev-kicker">Step · Columns and Range</div>', unsafe_allow_html=True)
+        try:
+            rows = read_excel_rows_from_bytes(uploaded_file.getvalue(), excel_sheet)
+        except Exception as exc:
+            st.error(f"Could not read rows: {exc}")
+            return None
+
+        header = rows[0] if rows else []
+        email_column = detect_email_column(rows)
+        if email_column:
+            st.success(f"Auto-detected email column: **{email_column}**")
+        else:
+            st.warning("Could not auto-detect the email column — pick it below.")
+            email_column = _column_picker(
+                "Email column", header, saved.get("email_column", ""), key="xl_email_col"
+            )
+
+        result_column, score_column = detect_result_score_columns(rows)
+        st.info(f"Results write to **{result_column}** (Valid/Invalid) and **{score_column}** (score/reason).")
+
+        start_row, end_all, end_row, delay_seconds = _range_and_delay_fields(saved, len(rows))
+
+    config = {
+        "mode": "Excel",
+        "spreadsheet_url": "",
+        "worksheet_name": "",
+        "excel_sheet": excel_sheet,
+        "email_column": email_column,
+        "result_column": result_column,
+        "score_column": score_column,
+        "start_row": int(start_row),
+        "end_row": 10**9 if end_all else int(end_row),
+        "end_row_all": end_all,
+        "delay_seconds": int(delay_seconds),
+        "retry_delay": 30,
+        "jitter": 3,
+    }
+    return config, "", False
+
+
+def _persist_setup(config, credentials_text="", remember_json=False):
+    if config["mode"] == "Google Sheets" and credentials_text.strip() and remember_json:
+        client_email = save_credentials(credentials_text)
+        st.success(f"Google JSON saved. Share your sheet with: {client_email}")
+
+    if config["mode"] == "Google Sheets" and credentials_text.strip():
+        config = {**config, "credentials_text": credentials_text.strip()}
+
+    save_config({k: v for k, v in config.items() if k != "credentials_text"})
+    st.session_state.config = config
+
+
 def setup_page():
-    app_header("Setup", "Connect a Google Sheet or upload Excel, then open the dashboard.")
+    app_header("Setup", "Connect a Google Sheet or upload Excel — most of it fills in automatically.")
     saved = load_saved_config()
 
     with st.container(border=True):
@@ -411,116 +724,18 @@ def setup_page():
         batch_col.toggle("Verify 1 by 1", value=True, disabled=True)
         coming_col.button("Batch mode coming soon", disabled=True, width="stretch")
 
-    with st.container(border=True):
-        st.markdown('<div class="ev-kicker">Columns and Range</div>', unsafe_allow_html=True)
-        c1, c2, c3 = st.columns(3)
-        email_column = c1.text_input("Email column", saved.get("email_column", DEFAULT_EMAIL_COLUMN))
-        result_column = c2.text_input("Result column", saved.get("result_column", DEFAULT_RESULT_COLUMN))
-        score_column = c3.text_input("Score / reason column", saved.get("score_column", DEFAULT_SCORE_COLUMN))
-
-        r1, r2, r3 = st.columns(3)
-        start_row = r1.number_input("Start row", min_value=1, value=int(saved.get("start_row", 2)), step=1)
-        with r2:
-            end_all = st.checkbox("All rows (to end of sheet)", value=bool(saved.get("end_row_all", False)))
-            end_row = st.number_input(
-                "End row",
-                min_value=1,
-                value=int(saved.get("end_row", 100)),
-                step=1,
-                disabled=end_all,
-            )
-        delay_seconds = r3.number_input(
-            "Delay after each email",
-            min_value=0,
-            value=int(saved.get("delay_seconds", 8)),
-            step=1,
-        )
-
-    spreadsheet_url = saved.get("spreadsheet_url", DEFAULT_SPREADSHEET_URL)
-    worksheet_name = saved.get("worksheet_name", DEFAULT_WORKSHEET_NAME)
-    credentials_text = ""
-    excel_sheet = saved.get("excel_sheet", "")
-
-    if mode == "Google Sheets":
-        with st.container(border=True):
-            st.markdown('<div class="ev-kicker">Google Sheet Access</div>', unsafe_allow_html=True)
-            spreadsheet_url = st.text_input("Spreadsheet URL", spreadsheet_url)
-            worksheet_name = st.text_input("Worksheet / tab name", worksheet_name)
-
-            existing_credentials = load_credentials_text()
-            client_email = get_json_client_email(existing_credentials)
-            if client_email:
-                st.success(f"Saved Google JSON found. Share your sheet with: {client_email}")
-
-            credentials_text = st.text_area(
-                "Google service account JSON",
-                value="",
-                height=150,
-                placeholder="Paste full JSON here. You can save it on this computer.",
-            )
-
-            s1, s2 = st.columns(2)
-            remember_json = s1.checkbox("Save this JSON on this computer", value=False)
-            if s2.button("Forget saved JSON", width="stretch"):
-                remove_saved_credentials()
-                st.success("Saved JSON removed.")
-                st.rerun()
-    else:
-        with st.container(border=True):
-            st.markdown('<div class="ev-kicker">Excel Upload</div>', unsafe_allow_html=True)
-            uploaded_file = st.file_uploader("Upload .xlsx file", type=["xlsx"])
-            if uploaded_file:
-                st.session_state.excel_file = uploaded_file
-            excel_sheet = st.text_input("Worksheet name", excel_sheet)
-            st.caption("Leave worksheet blank to use the first sheet.")
-            remember_json = False
-
-    config = {
-        "mode": mode,
-        "spreadsheet_url": spreadsheet_url,
-        "worksheet_name": worksheet_name,
-        "excel_sheet": excel_sheet.strip(),
-        "email_column": email_column.strip() or DEFAULT_EMAIL_COLUMN,
-        "result_column": result_column.strip() or DEFAULT_RESULT_COLUMN,
-        "score_column": score_column.strip() or DEFAULT_SCORE_COLUMN,
-        "start_row": int(start_row),
-        "end_row": 10**9 if end_all else int(end_row),
-        "end_row_all": end_all,
-        "delay_seconds": int(delay_seconds),
-        "retry_delay": 30,
-        "jitter": 3,
-    }
-
-    end_row_label = "last row of the sheet" if end_all else f"row {config['end_row']}"
-    st.info(
-        f"Emails read from column {config['email_column'].upper()}; "
-        f"results write to {config['result_column'].upper()} and {config['score_column'].upper()}. "
-        f"Range: row {config['start_row']} to {end_row_label}."
-    )
+    result = google_sheets_setup(saved) if mode == "Google Sheets" else excel_setup(saved)
+    if result is None:
+        return
+    config, credentials_text, remember_json = result
 
     c1, c2 = st.columns([1, 1])
     if c1.button("Save setup", type="primary", width="stretch"):
-        if mode == "Google Sheets" and credentials_text.strip() and remember_json:
-            client_email = save_credentials(credentials_text)
-            st.success(f"Google JSON saved. Share your sheet with: {client_email}")
-
-        if mode == "Google Sheets" and credentials_text.strip():
-            json.loads(credentials_text)
-            config["credentials_text"] = credentials_text.strip()
-
-        save_config({k: v for k, v in config.items() if k != "credentials_text"})
-        st.session_state.config = config
+        _persist_setup(config, credentials_text, remember_json)
         st.success("Setup saved.")
 
     if c2.button("Save and open dashboard", width="stretch"):
-        if mode == "Google Sheets" and credentials_text.strip() and remember_json:
-            save_credentials(credentials_text)
-        if mode == "Google Sheets" and credentials_text.strip():
-            json.loads(credentials_text)
-            config["credentials_text"] = credentials_text.strip()
-
-        save_config({k: v for k, v in config.items() if k != "credentials_text"})
-        st.session_state.config = config
+        _persist_setup(config, credentials_text, remember_json)
         st.session_state.page = "Dashboard"
         st.rerun()
 
@@ -572,22 +787,12 @@ def dashboard_page():
                 outcome_slot, valid_this_run, invalid_this_run, key="outcome_chart_initial"
             )
 
-    with st.container(border=True):
-        st.markdown('<div class="ev-kicker">Run Control</div>', unsafe_allow_html=True)
-        range_label = "last row of the sheet" if config.get("end_row_all") else str(scan["end_row"])
-        st.write(
-            f"Mode: **1 by 1** | Delay: **{config.get('delay_seconds', 8)} seconds** after each email | "
-            f"Columns: **{index_to_column(scan['email_col'])} -> {index_to_column(scan['result_col'])}, "
-            f"{index_to_column(scan['score_col'])}** | Range: **{scan['start_row']} -> {range_label}**"
-        )
-        run_limit = st.number_input(
-            "How many emails to verify now",
-            min_value=1,
-            max_value=max(total_unique, 1),
-            value=min(total_unique, 1000) if total_unique else 1,
-            step=1,
-        )
-        start = st.button("Start verifying 1 by 1", type="primary", disabled=total_unique == 0)
+    start = st.button(
+        "Start verifying",
+        type="primary",
+        width="stretch",
+        disabled=total_unique == 0,
+    )
 
     status_box = st.empty()
     log_box = st.empty()
@@ -596,7 +801,8 @@ def dashboard_page():
     if start:
         logs = []
         verified = 0
-        for email in scan["unique_emails"][: int(run_limit)]:
+        total_to_run = total_unique
+        for email in scan["unique_emails"]:
             row_numbers = scan["email_to_rows"][email]
             status_box.info(f"Verifying {email}")
 
@@ -629,14 +835,14 @@ def dashboard_page():
 
             verified += 1
             log_box.code("\n".join(logs[-80:]), language="text")
-            run_progress.progress(min(verified / int(run_limit), 1.0))
+            run_progress.progress(min(verified / total_to_run, 1.0))
             render_kpis(kpi_slot, scan, done_this_run, valid_this_run, invalid_this_run, total_unique)
             render_outcome_chart(
                 outcome_slot, valid_this_run, invalid_this_run, key=f"outcome_chart_run_{verified}"
             )
             render_progress_gauge(gauge_slot, scan, done_this_run, key=f"gauge_chart_run_{verified}")
 
-            if verified < int(run_limit):
+            if verified < total_to_run:
                 delay = int(config.get("delay_seconds", 8))
                 status_box.info(f"Saved. Waiting {delay}s before next email...")
                 time.sleep(delay)
