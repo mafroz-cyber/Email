@@ -52,29 +52,35 @@ def inject_css():
 .block-container {
   padding-top: 1.5rem;
   padding-bottom: 3rem;
-  max-width: 1180px;
+  max-width: 1220px;
 }
 .ev-title {
-  font-size: 2rem;
-  font-weight: 750;
+  font-size: 2.1rem;
+  font-weight: 800;
   margin: 0 0 .25rem 0;
+  background: linear-gradient(90deg, #2a78d6, #6f42e8);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  display: inline-block;
 }
 .ev-subtitle {
-  opacity: .75;
-  margin-bottom: 1.25rem;
+  opacity: .7;
+  margin-bottom: 1.4rem;
 }
 .ev-band {
-  border: 1px solid rgba(128, 128, 128, .3);
-  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, .25);
+  border-radius: 10px;
   padding: 1rem 1.1rem;
   margin: .75rem 0;
 }
 .ev-kicker {
   opacity: .65;
-  font-size: .85rem;
+  font-size: .8rem;
   text-transform: uppercase;
-  letter-spacing: .04em;
-  font-weight: 700;
+  letter-spacing: .06em;
+  font-weight: 750;
+  margin-bottom: .5rem;
 }
 .ev-step {
   border-left: 3px solid var(--primary-color, #2563eb);
@@ -82,13 +88,26 @@ def inject_css():
   margin: .75rem 0;
 }
 div[data-testid="stMetric"] {
-  border: 1px solid rgba(128, 128, 128, .3);
-  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, .25);
+  border-radius: 10px;
   padding: .9rem;
+  transition: border-color .15s ease;
+}
+div[data-testid="stMetric"]:hover {
+  border-color: rgba(42, 120, 214, .55);
+}
+div[data-testid="stVerticalBlockBorderWrapper"] {
+  border-radius: 12px !important;
 }
 div[data-testid="stButton"] > button {
-  border-radius: 7px;
+  border-radius: 8px;
   font-weight: 650;
+}
+div[data-testid="stButton"] > button[kind="primary"] {
+  box-shadow: 0 2px 10px rgba(42, 120, 214, .35);
+}
+hr {
+  margin: 1.1rem 0;
 }
 </style>
 """,
@@ -253,29 +272,50 @@ def scan_source(rows, config):
     }
 
 
-def _stacked_bar(segments, height=110):
-    fig = go.Figure()
-    total = max(sum(value for _, value, _ in segments), 1)
-    for label, value, color in segments:
-        fig.add_bar(
-            y=[""],
-            x=[value],
-            name=f"{label} ({value})",
-            orientation="h",
-            marker_color=color,
-            text=str(value) if value else "",
-            textposition="inside",
-            insidetextanchor="middle",
-        )
-    fig.update_layout(
-        barmode="stack",
-        height=height,
-        margin=dict(l=0, r=0, t=8, b=8),
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.05, xanchor="left", x=0),
-        xaxis=dict(visible=False, range=[0, total]),
-        yaxis=dict(visible=False),
+def _donut_chart(segments, height=230):
+    labeled = [(label, value, color) for label, value, color in segments if value]
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=[label for label, _, _ in labeled],
+                values=[value for _, value, _ in labeled],
+                hole=0.65,
+                marker=dict(colors=[color for _, _, color in labeled], line=dict(width=0)),
+                textinfo="value",
+                textposition="inside",
+                hovertemplate="%{label}: %{value} (%{percent})<extra></extra>",
+                sort=False,
+            )
+        ]
     )
+    fig.update_layout(
+        height=height,
+        margin=dict(l=10, r=10, t=10, b=10),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.18, xanchor="center", x=0.5),
+    )
+    return fig
+
+
+def _gauge_chart(value, total, height=230):
+    pct = 0 if not total else round(min(value / total, 1.0) * 100, 1)
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=pct,
+            number={"suffix": "%", "font": {"size": 30}},
+            gauge={
+                "axis": {"range": [0, 100], "tickwidth": 0, "showticklabels": False},
+                "bar": {"color": "#2a78d6"},
+                "bgcolor": "rgba(128,128,128,.18)",
+                "borderwidth": 0,
+                "steps": [
+                    {"range": [0, 100], "color": "rgba(128,128,128,.08)"},
+                ],
+            },
+        )
+    )
+    fig.update_layout(height=height, margin=dict(l=20, r=20, t=20, b=10))
     return fig
 
 
@@ -284,13 +324,13 @@ def render_composition_chart(container, scan):
         st.caption("Selected rows")
         segments = [
             ("Verified", scan["already_done"], "#2a78d6"),
-            ("Pending", len(scan["pending"]), "#eb6834"),
-            ("Blank", scan["blank"], "#898781"),
+            ("Pending", len(scan["pending"]), "#f59e0b"),
+            ("Blank", scan["blank"], "#94a3b8"),
         ]
         if sum(v for _, v, _ in segments) == 0:
             st.caption("No rows in the selected range.")
             return
-        st.plotly_chart(_stacked_bar(segments), use_container_width=True, theme="streamlit")
+        st.plotly_chart(_donut_chart(segments), use_container_width=True, theme="streamlit")
 
 
 def render_outcome_chart(container, valid, invalid):
@@ -300,10 +340,21 @@ def render_outcome_chart(container, valid, invalid):
             st.caption("Run verification to see the breakdown here.")
             return
         segments = [
-            ("Valid", valid, "#0ca30c"),
-            ("Invalid", invalid, "#d03b3b"),
+            ("Valid", valid, "#16a34a"),
+            ("Invalid", invalid, "#dc2626"),
         ]
-        st.plotly_chart(_stacked_bar(segments), use_container_width=True, theme="streamlit")
+        st.plotly_chart(_donut_chart(segments), use_container_width=True, theme="streamlit")
+
+
+def render_progress_gauge(container, scan, done_this_run):
+    with container.container():
+        st.caption("Overall completion")
+        total = scan["already_done"] + len(scan["unique_emails"])
+        done = scan["already_done"] + done_this_run
+        if total == 0:
+            st.caption("No rows in the selected range.")
+            return
+        st.plotly_chart(_gauge_chart(done, total), use_container_width=True, theme="streamlit")
 
 
 def render_kpis(container, scan, done, valid, invalid, total_unique):
@@ -369,7 +420,15 @@ def setup_page():
 
         r1, r2, r3 = st.columns(3)
         start_row = r1.number_input("Start row", min_value=1, value=int(saved.get("start_row", 2)), step=1)
-        end_row = r2.number_input("End row", min_value=1, value=int(saved.get("end_row", 100)), step=1)
+        with r2:
+            end_all = st.checkbox("All rows (to end of sheet)", value=bool(saved.get("end_row_all", False)))
+            end_row = st.number_input(
+                "End row",
+                min_value=1,
+                value=int(saved.get("end_row", 100)),
+                step=1,
+                disabled=end_all,
+            )
         delay_seconds = r3.number_input(
             "Delay after each email",
             min_value=0,
@@ -425,15 +484,18 @@ def setup_page():
         "result_column": result_column.strip() or DEFAULT_RESULT_COLUMN,
         "score_column": score_column.strip() or DEFAULT_SCORE_COLUMN,
         "start_row": int(start_row),
-        "end_row": int(end_row),
+        "end_row": 10**9 if end_all else int(end_row),
+        "end_row_all": end_all,
         "delay_seconds": int(delay_seconds),
         "retry_delay": 30,
         "jitter": 3,
     }
 
+    end_row_label = "last row of the sheet" if end_all else f"row {config['end_row']}"
     st.info(
         f"Emails read from column {config['email_column'].upper()}; "
-        f"results write to {config['result_column'].upper()} and {config['score_column'].upper()}."
+        f"results write to {config['result_column'].upper()} and {config['score_column'].upper()}. "
+        f"Range: row {config['start_row']} to {end_row_label}."
     )
 
     c1, c2 = st.columns([1, 1])
@@ -496,20 +558,25 @@ def dashboard_page():
     kpi_slot = st.empty()
     render_kpis(kpi_slot, scan, done_this_run, valid_this_run, invalid_this_run, total_unique)
 
-    chart_col1, chart_col2 = st.columns(2)
-    with chart_col1:
-        composition_slot = st.empty()
-        render_composition_chart(composition_slot, scan)
-    with chart_col2:
-        outcome_slot = st.empty()
-        render_outcome_chart(outcome_slot, valid_this_run, invalid_this_run)
+    with st.container(border=True):
+        chart_col1, chart_col2, chart_col3 = st.columns(3)
+        with chart_col1:
+            composition_slot = st.empty()
+            render_composition_chart(composition_slot, scan)
+        with chart_col2:
+            gauge_slot = st.empty()
+            render_progress_gauge(gauge_slot, scan, done_this_run)
+        with chart_col3:
+            outcome_slot = st.empty()
+            render_outcome_chart(outcome_slot, valid_this_run, invalid_this_run)
 
     with st.container(border=True):
         st.markdown('<div class="ev-kicker">Run Control</div>', unsafe_allow_html=True)
+        range_label = "last row of the sheet" if config.get("end_row_all") else str(scan["end_row"])
         st.write(
             f"Mode: **1 by 1** | Delay: **{config.get('delay_seconds', 8)} seconds** after each email | "
             f"Columns: **{index_to_column(scan['email_col'])} -> {index_to_column(scan['result_col'])}, "
-            f"{index_to_column(scan['score_col'])}**"
+            f"{index_to_column(scan['score_col'])}** | Range: **{scan['start_row']} -> {range_label}**"
         )
         run_limit = st.number_input(
             "How many emails to verify now",
@@ -563,6 +630,7 @@ def dashboard_page():
             run_progress.progress(min(verified / int(run_limit), 1.0))
             render_kpis(kpi_slot, scan, done_this_run, valid_this_run, invalid_this_run, total_unique)
             render_outcome_chart(outcome_slot, valid_this_run, invalid_this_run)
+            render_progress_gauge(gauge_slot, scan, done_this_run)
 
             if verified < int(run_limit):
                 delay = int(config.get("delay_seconds", 8))
