@@ -584,7 +584,7 @@ def dashboard_page():
             "How many emails to verify now",
             min_value=1,
             max_value=max(total_unique, 1),
-            value=min(total_unique, 25) if total_unique else 1,
+            value=min(total_unique, 1000) if total_unique else 1,
             step=1,
         )
         start = st.button("Start verifying 1 by 1", type="primary", disabled=total_unique == 0)
