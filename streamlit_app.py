@@ -319,7 +319,7 @@ def _gauge_chart(value, total, height=230):
     return fig
 
 
-def render_composition_chart(container, scan):
+def render_composition_chart(container, scan, key="composition_chart"):
     with container.container():
         st.caption("Selected rows")
         segments = [
@@ -330,10 +330,10 @@ def render_composition_chart(container, scan):
         if sum(v for _, v, _ in segments) == 0:
             st.caption("No rows in the selected range.")
             return
-        st.plotly_chart(_donut_chart(segments), use_container_width=True, theme="streamlit")
+        st.plotly_chart(_donut_chart(segments), width="stretch", theme="streamlit", key=key)
 
 
-def render_outcome_chart(container, valid, invalid):
+def render_outcome_chart(container, valid, invalid, key="outcome_chart"):
     with container.container():
         st.caption("This run: valid vs invalid")
         if valid + invalid == 0:
@@ -343,10 +343,10 @@ def render_outcome_chart(container, valid, invalid):
             ("Valid", valid, "#16a34a"),
             ("Invalid", invalid, "#dc2626"),
         ]
-        st.plotly_chart(_donut_chart(segments), use_container_width=True, theme="streamlit")
+        st.plotly_chart(_donut_chart(segments), width="stretch", theme="streamlit", key=key)
 
 
-def render_progress_gauge(container, scan, done_this_run):
+def render_progress_gauge(container, scan, done_this_run, key="gauge_chart"):
     with container.container():
         st.caption("Overall completion")
         total = scan["already_done"] + len(scan["unique_emails"])
@@ -354,7 +354,7 @@ def render_progress_gauge(container, scan, done_this_run):
         if total == 0:
             st.caption("No rows in the selected range.")
             return
-        st.plotly_chart(_gauge_chart(done, total), use_container_width=True, theme="streamlit")
+        st.plotly_chart(_gauge_chart(done, total), width="stretch", theme="streamlit", key=key)
 
 
 def render_kpis(container, scan, done, valid, invalid, total_unique):
@@ -409,7 +409,7 @@ def setup_page():
 
         batch_col, coming_col = st.columns([1, 2])
         batch_col.toggle("Verify 1 by 1", value=True, disabled=True)
-        coming_col.button("Batch mode coming soon", disabled=True, use_container_width=True)
+        coming_col.button("Batch mode coming soon", disabled=True, width="stretch")
 
     with st.container(border=True):
         st.markdown('<div class="ev-kicker">Columns and Range</div>', unsafe_allow_html=True)
@@ -461,7 +461,7 @@ def setup_page():
 
             s1, s2 = st.columns(2)
             remember_json = s1.checkbox("Save this JSON on this computer", value=False)
-            if s2.button("Forget saved JSON", use_container_width=True):
+            if s2.button("Forget saved JSON", width="stretch"):
                 remove_saved_credentials()
                 st.success("Saved JSON removed.")
                 st.rerun()
@@ -499,7 +499,7 @@ def setup_page():
     )
 
     c1, c2 = st.columns([1, 1])
-    if c1.button("Save setup", type="primary", use_container_width=True):
+    if c1.button("Save setup", type="primary", width="stretch"):
         if mode == "Google Sheets" and credentials_text.strip() and remember_json:
             client_email = save_credentials(credentials_text)
             st.success(f"Google JSON saved. Share your sheet with: {client_email}")
@@ -512,7 +512,7 @@ def setup_page():
         st.session_state.config = config
         st.success("Setup saved.")
 
-    if c2.button("Save and open dashboard", use_container_width=True):
+    if c2.button("Save and open dashboard", width="stretch"):
         if mode == "Google Sheets" and credentials_text.strip() and remember_json:
             save_credentials(credentials_text)
         if mode == "Google Sheets" and credentials_text.strip():
@@ -530,7 +530,7 @@ def dashboard_page():
     with top_col:
         app_header("Dashboard", "Review volume, then verify emails one at a time.")
     with refresh_col:
-        if st.button("Refresh sheet data", use_container_width=True):
+        if st.button("Refresh sheet data", width="stretch"):
             st.session_state.sheet_cache_bust = st.session_state.get("sheet_cache_bust", 0) + 1
             st.rerun()
 
@@ -562,13 +562,15 @@ def dashboard_page():
         chart_col1, chart_col2, chart_col3 = st.columns(3)
         with chart_col1:
             composition_slot = st.empty()
-            render_composition_chart(composition_slot, scan)
+            render_composition_chart(composition_slot, scan, key="composition_chart_initial")
         with chart_col2:
             gauge_slot = st.empty()
-            render_progress_gauge(gauge_slot, scan, done_this_run)
+            render_progress_gauge(gauge_slot, scan, done_this_run, key="gauge_chart_initial")
         with chart_col3:
             outcome_slot = st.empty()
-            render_outcome_chart(outcome_slot, valid_this_run, invalid_this_run)
+            render_outcome_chart(
+                outcome_slot, valid_this_run, invalid_this_run, key="outcome_chart_initial"
+            )
 
     with st.container(border=True):
         st.markdown('<div class="ev-kicker">Run Control</div>', unsafe_allow_html=True)
@@ -629,8 +631,10 @@ def dashboard_page():
             log_box.code("\n".join(logs[-80:]), language="text")
             run_progress.progress(min(verified / int(run_limit), 1.0))
             render_kpis(kpi_slot, scan, done_this_run, valid_this_run, invalid_this_run, total_unique)
-            render_outcome_chart(outcome_slot, valid_this_run, invalid_this_run)
-            render_progress_gauge(gauge_slot, scan, done_this_run)
+            render_outcome_chart(
+                outcome_slot, valid_this_run, invalid_this_run, key=f"outcome_chart_run_{verified}"
+            )
+            render_progress_gauge(gauge_slot, scan, done_this_run, key=f"gauge_chart_run_{verified}")
 
             if verified < int(run_limit):
                 delay = int(config.get("delay_seconds", 8))
@@ -677,7 +681,7 @@ def render_download_buttons(rows, key_prefix):
         data=results_to_csv_bytes(rows),
         file_name="verified_emails.csv",
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
         key=f"{key_prefix}_csv",
     )
     d2.download_button(
@@ -685,7 +689,7 @@ def render_download_buttons(rows, key_prefix):
         data=results_to_excel_bytes(rows),
         file_name="verified_emails.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width="stretch",
         key=f"{key_prefix}_xlsx",
     )
 
@@ -774,7 +778,7 @@ def quick_verify_page():
             c2.metric("Valid", valid_count)
             c3.metric("Invalid", len(results_rows) - valid_count)
 
-            st.dataframe(pd.DataFrame(results_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(results_rows), width="stretch", hide_index=True)
             render_download_buttons(results_rows, key_prefix="bulk")
 
 
@@ -796,13 +800,13 @@ def instructions_page():
     with st.container(border=True):
         st.markdown('<div class="ev-kicker">Direct Links</div>', unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
-        c1.link_button("Create Google Project", "https://console.cloud.google.com/projectcreate", use_container_width=True)
-        c2.link_button("Enable Sheets API", "https://console.cloud.google.com/apis/library/sheets.googleapis.com", use_container_width=True)
-        c3.link_button("Enable Drive API", "https://console.cloud.google.com/apis/library/drive.googleapis.com", use_container_width=True)
+        c1.link_button("Create Google Project", "https://console.cloud.google.com/projectcreate", width="stretch")
+        c2.link_button("Enable Sheets API", "https://console.cloud.google.com/apis/library/sheets.googleapis.com", width="stretch")
+        c3.link_button("Enable Drive API", "https://console.cloud.google.com/apis/library/drive.googleapis.com", width="stretch")
         c4, c5, c6 = st.columns(3)
-        c4.link_button("Create Service Account", "https://console.cloud.google.com/iam-admin/serviceaccounts/create", use_container_width=True)
-        c5.link_button("Service Accounts", "https://console.cloud.google.com/iam-admin/serviceaccounts", use_container_width=True)
-        c6.link_button("Open Google Sheets", "https://sheets.google.com", use_container_width=True)
+        c4.link_button("Create Service Account", "https://console.cloud.google.com/iam-admin/serviceaccounts/create", width="stretch")
+        c5.link_button("Service Accounts", "https://console.cloud.google.com/iam-admin/serviceaccounts", width="stretch")
+        c6.link_button("Open Google Sheets", "https://sheets.google.com", width="stretch")
 
     with st.container(border=True):
         st.markdown('<div class="ev-kicker">Get Google JSON</div>', unsafe_allow_html=True)
